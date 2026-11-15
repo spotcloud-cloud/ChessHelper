@@ -1,0 +1,19 @@
+{
+  "game_style": "rochess",
+  "orientation": "auto",
+  "stop_key": "o",
+  "limit_strength": true,
+  "elo": 2200,
+  "think_time": 0.6,
+  "obvious_gap": 120,
+  "mate_within": 3,
+  "use_drag": true,
+  "click_hold": 0.1,
+  "click_gap": 0.8,
+  "move_speed": 0.15,
+  "after_move_delay": 1.2,
+  "next_delay": 1.5,
+  "max_retries": 2,
+  "stop_when_game_over": true,
+  "stockfish_path": "stockfish.exe"
+}
