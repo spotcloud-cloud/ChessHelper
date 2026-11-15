@@ -20,7 +20,7 @@ An automated computer-vision chess assistant built with Python, OpenCV, and Stoc
 
 ### Option 1: Run the Executable (Windows)
 1. Download `ChessHelper.zip` and `stockfish.exe` from the [**Releases**](../../releases) page.
-2. After downloading the `.zip` folder, then extract the folder. After extracting, you are obligated to download `stockfish.exe` from [**Stockfish**]([../../releases](https://stockfishchess.org/). After, move the `stockfish.exe` file to the folder.
+2. After downloading the `.zip` folder, then extract the folder. After extracting, you are obligated to download `stockfish.exe` from [the official Stockfish website](https://stockfishchess.org). After, move the `stockfish.exe` file to the folder.
 3. Run ChessHelper by writing at the folder adress "cmd" or open the `ChessHelper.exe` file, after, follow the on-screen menu.
 
 ### Option 2: Run from Source
