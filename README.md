@@ -22,6 +22,7 @@ An automated computer-vision chess assistant built with Python, OpenCV, and Stoc
 1. Go to the Releases page and download ChessHelper.exe.
 2. Run it. Stockfish and the piece templates are built in.
 3. Pick a game and a mode, then press Start. It updates itself when a new release is out.
+##### (Contains Stockfish (GPL): source at stockfishchess.org)
 
 ### Option 2: Run from Source
 1. Clone the repository:
