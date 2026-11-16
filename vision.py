@@ -1,4 +1,4 @@
-import sys, os
+import sys, os, traceback
 import mss, numpy as np, cv2
 
 if getattr(sys, "frozen", False):
@@ -22,6 +22,10 @@ HL = []
 TPL_DIR = ""
 BG_TOL = 22             # how close a pixel must be to the background to be erased
 WHITE_BRIGHTNESS = 170  # bright-pixel level above which a piece counts as white
+RED_MARGIN = 12         # red must beat green and blue by this much to count as check glow
+GLOW_MIN_PIXELS = 150   # this many red pixels in a square = king-in-check glow
+
+_printed_errors = set()
 
 def set_style(name):
     global STYLE, LIGHT, DARK, HL, TPL_DIR
@@ -76,51 +80,69 @@ def find_board(img):
     return left, top, side
 
 def prepare(raw):
-    """Returns (gray image with background erased, is_highlighted, label_ink)."""
+    """Returns (gray image with background erased, is_highlighted, label_ink, glow).
+    glow is None normally; for a king-in-check square it is 'w' or 'b' (piece color)."""
     sq = cv2.resize(raw, (96, 96))
-    flat = sq.reshape(-1, 3).astype(int)
-    q = flat // 16
+    si = sq.astype(int)
+    gray = cv2.cvtColor(sq, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    maxc, minc = si.max(axis=2), si.min(axis=2)
+
+    # strongly red pixels (BGR order: channel 2 is red) = the check glow
+    red = (si[:, :, 2] - np.maximum(si[:, :, 0], si[:, :, 1])) > RED_MARGIN
+    red = red & (si[:, :, 2] > 100)
+    red_big = cv2.dilate(red.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+
+    # background = the most common color among the non-red pixels
+    flat = si.reshape(-1, 3)
+    valid = ~red_big.reshape(-1)
+    if valid.sum() < 600:
+        valid = np.ones(len(flat), bool)
+    fv = flat[valid]
+    q = fv // 16
     key = q[:, 0] * 256 + q[:, 1] * 16 + q[:, 2]
     vals, counts = np.unique(key, return_counts=True)
     top_key = vals[np.argmax(counts)]
-    bg = np.median(flat[key == top_key], axis=0)
+    bg = np.median(fv[key == top_key], axis=0)
 
     d_plain = min(np.abs(bg - LIGHT).sum(), np.abs(bg - DARK).sum())
     highlighted = bool(d_plain > 30)
 
-    # amount of "ink" in the corner where the rank number is drawn
     region = sq[3:22, 3:20]
     rgray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
     diff = np.abs(region.astype(int) - bg).sum(axis=2)
-    ink = int(((diff > 45) & (rgray > 60)).sum())
+    ink = int(((diff > 45) & (rgray > 60) & ~red_big[3:22, 3:20]).sum())
 
-    erase = np.abs(sq.astype(int) - bg).sum(axis=2) < BG_TOL
-    g = cv2.cvtColor(sq, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    glow = None
+    if red.sum() >= GLOW_MIN_PIXELS:
+        # check glow: this square holds a king; only its color matters
+        near_bg = (np.abs(si - LIGHT).sum(axis=2) < 30) | (np.abs(si - DARK).sum(axis=2) < 30)
+        bright = (gray > 215) & ((maxc - minc) <= 28) & ~near_bg & ~red_big
+        glow = "w" if bright.sum() >= 120 else "b"
+
+    erase = (np.abs(si - bg).sum(axis=2) < BG_TOL) | red_big
+    g = gray.copy()
     g[erase] = 0
-    if highlighted:
-        hsv = cv2.cvtColor(sq, cv2.COLOR_BGR2HSV)
-        hue, saturation = hsv[:, :, 0], hsv[:, :, 1]
-        red_overlay = (saturation > 55) & ((hue < 15) | (hue > 165))
-        g[red_overlay] = 0
     g[:30, :30] = 0      # rank number (top-left corner)
     g[74:, 70:] = 0      # file letter (bottom-right corner)
-    return g, highlighted, ink
+    return g, highlighted, ink, glow
 
 def split_board(img, x, y, side):
     s = side // 8
-    norm, hl, ink = [], [], []
+    norm, hl, ink, glow = [], [], [], []
     for r in range(8):
-        nrow, hrow, irow = [], [], []
+        nrow, hrow, irow, grow = [], [], [], []
         for c in range(8):
             raw = img[y + r*s : y + (r+1)*s, x + c*s : x + (c+1)*s]
-            g, h, i = prepare(raw)
+            g, h, i, gl = prepare(raw)
             nrow.append(g)
             hrow.append(h)
             irow.append(i)
+            grow.append(gl)
         norm.append(nrow)
         hl.append(hrow)
         ink.append(irow)
-    return norm, hl, ink
+        glow.append(grow)
+    return norm, hl, ink, glow
 
 def fname(sym):
     return os.path.join(TPL_DIR, f"{'w' if sym.isupper() else 'b'}_{sym.upper()}.png")
@@ -128,7 +150,7 @@ def fname(sym):
 def save_templates():
     img = grab()
     x, y, side = find_board(img)
-    sq, _, _ = split_board(img, x, y, side)
+    sq, _, _, _ = split_board(img, x, y, side)
     layout = {0: "rnbqkbnr", 1: "pppppppp", 6: "PPPPPPPP", 7: "RNBQKBNR"}
     os.makedirs(TPL_DIR, exist_ok=True)
     for r, row in layout.items():
@@ -161,13 +183,19 @@ def score(n, t):
     padded = cv2.copyMakeBorder(n, 8, 8, 8, 8, cv2.BORDER_CONSTANT, value=0)
     return float(cv2.matchTemplate(padded, t, cv2.TM_CCOEFF_NORMED).max())
 
-def read_screen_rows(sq, tpl):
+def read_screen_rows(sq, tpl, glow=None):
     rows, scores, lights = [], [], []
     for r in range(8):
         row, srow, lrow = "", [], []
         for c in range(8):
             n = sq[r][c]
-            if is_empty(n):
+            gl = glow[r][c] if glow else None
+            if gl is not None:
+                # a red check glow only ever sits on a king
+                row += "K" if gl == "w" else "k"
+                srow.append(1.0)
+                lrow.append(250.0 if gl == "w" else 100.0)
+            elif is_empty(n):
                 row += "."
                 srow.append(1.0)
                 lrow.append(0.0)
@@ -193,12 +221,9 @@ def decide_orientation(rows, ink):
         return True, "forced by setting"
     if ORIENT == "black":
         return False, "forced by setting"
-    # The corner labels are "8" on one end of the left column and "1" on the other.
-    # An "8" has clearly more ink than a "1", so compare just those two squares.
     t, b = ink[0][0], ink[7][0]
     big = max(t, b)
     if big > 0 and abs(t - b) / big > 0.15:
-        # more ink at the top = the "8" is on top = normal board
         return t > b, f"from corner labels 8 vs 1 (ink top {t}, bottom {b})"
     return white_at_bottom_by_pieces(rows), f"from piece count (corner labels unclear: {t} vs {b})"
 
@@ -215,12 +240,11 @@ def rows_to_fen(rows):
         fen_rows.append(out + (str(empty) if empty else ""))
     return "/".join(fen_rows)
 
-def read_state(tpl=None):
-    tpl = tpl or load_templates()
+def _read_state(tpl):
     img = grab()
     x, y, side = find_board(img)
-    sq, hl, ink = split_board(img, x, y, side)
-    rows, _, _ = read_screen_rows(sq, tpl)
+    sq, hl, ink, glow = split_board(img, x, y, side)
+    rows, _, _ = read_screen_rows(sq, tpl, glow)
     wab, _ = decide_orientation(rows, ink)
 
     mover_white = None
@@ -234,19 +258,32 @@ def read_state(tpl=None):
     return {"placement": rows_to_fen(rows), "wab": wab,
             "mover_white": mover_white, "box": (x, y, side)}
 
+def read_state(tpl=None):
+    tpl = tpl or load_templates()
+    try:
+        return _read_state(tpl)
+    except Exception as e:
+        key = (type(e).__name__, str(e))
+        if key not in _printed_errors:          # print each distinct error once
+            _printed_errors.add(key)
+            print("\n[vision] board read failed -> real error:")
+            traceback.print_exc()
+        raise
+
 def debug():
     img = grab()
     x, y, side = find_board(img)
     print("Game style:", STYLE, "| orientation setting:", ORIENT)
     print("Board found: left", x, "top", y, "size", side)
-    sq, hl, ink = split_board(img, x, y, side)
-    rows, scores, lights = read_screen_rows(sq, load_templates())
+    sq, hl, ink, glow = split_board(img, x, y, side)
+    rows, scores, lights = read_screen_rows(sq, load_templates(), glow)
     print("\nAs seen on screen (top row first):")
     for row in rows:
         print("  " + " ".join(row))
-    print("\nHighlighted squares (X):")
+    print("\nHighlighted squares (X) and check glow (W/B = white/black king in check):")
     for r in range(8):
-        print("  " + " ".join("X" if hl[r][c] else "." for c in range(8)))
+        print("  " + " ".join(glow[r][c].upper() if glow[r][c] else ("X" if hl[r][c] else ".")
+                              for c in range(8)))
     print("\nShape match scores (below 0.6 = suspicious):")
     for srow in scores:
         print("  " + " ".join(f"{s:.2f}" for s in srow))

@@ -1,4 +1,9 @@
-*.exe
+__pycache__/
 build/
 dist/
-__pycache__/
+*.exe
+*.sha256
+config.json
+debug_board.png
+board_crop.png
+update.bat
