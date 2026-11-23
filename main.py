@@ -197,12 +197,6 @@ def guess_castling(b):
         if b.piece_at(chess.A8) == br: r += "q"
     return r or "-"
 
-def build_board(st):
-    turn_white = True if st["mover_white"] is None else (not st["mover_white"])
-    tmp = chess.Board(st["placement"] + " w - - 0 1")
-    fen = f'{st["placement"]} {"w" if turn_white else "b"} {guess_castling(tmp)} - 0 1'
-    return chess.Board(fen), turn_white
-
 def plausible(board):
     if board.status() != chess.STATUS_VALID:
         return False
@@ -214,6 +208,28 @@ def plausible(board):
         if n(chess.KING) != 1 or pawns > 8 or extras > 8 - pawns:
             return False
     return True
+
+def build_board(st):
+    """Works out whose turn it is. A king in check is always the side to move; otherwise
+    the side that did NOT make the last (highlighted) move. If the preferred side gives an
+    impossible position, the other side is tried."""
+    cw = st.get("check_white")
+    if cw is not None:
+        pref = cw
+    elif st["mover_white"] is None:
+        pref = True
+    else:
+        pref = not st["mover_white"]
+    castling = guess_castling(chess.Board(st["placement"] + " w - - 0 1"))
+    first = None
+    for turn_white in (pref, not pref):
+        fen = f'{st["placement"]} {"w" if turn_white else "b"} {castling} - 0 1'
+        b = chess.Board(fen)
+        if first is None:
+            first = (b, turn_white)
+        if plausible(b):
+            return b, turn_white
+    return first
 
 def describe_result(board):
     o = board.outcome()
@@ -397,12 +413,17 @@ def test_move():
     print("Done. Did the piece move?")
 
 def stable_state(tpl):
+    """Two reads 0.35 s apart must agree on the pieces and the orientation. The turn
+    information (last mover, check) is merged, so a pulsing check glow can't block it."""
     a = vision.read_state(tpl)
     time.sleep(0.35)
     b = vision.read_state(tpl)
-    same = (a["placement"], a["wab"], a["mover_white"]) == \
-           (b["placement"], b["wab"], b["mover_white"])
-    return b if same else None
+    if (a["placement"], a["wab"]) != (b["placement"], b["wab"]):
+        return None
+    for k in ("mover_white", "check_white"):
+        if b[k] is None:
+            b[k] = a[k]
+    return b
 
 # ---------------------------------------------------------------- Next button (puzzles)
 
@@ -636,6 +657,8 @@ def auto_puzzles():
     last_moved = None
     tries = 0
     last_bad = None
+    bad_since = None
+    bad_warned = False
     hidden_msg = False
     opp_seen = None
     opp_since = time.time()
@@ -655,6 +678,7 @@ def auto_puzzles():
             press(pos[0] + ox, pos[1] + oy)
             move_to(pos[0] + ox - 120, pos[1] + oy, 0.15)       # step off the button
             last_moved, tries, opp_seen, warned = None, 0, None, False
+            bad_since, bad_warned = None, False
             sleep_check(CFG["next_delay"])
             continue
 
@@ -674,11 +698,18 @@ def auto_puzzles():
         board, turn_white = build_board(st)
 
         if not plausible(board):
+            if bad_since is None:
+                bad_since = time.time()
             if st["placement"] != last_bad:
                 print("Skipping a misread board (a new puzzle may be loading):", st["placement"])
                 last_bad = st["placement"]
+            elif time.time() - bad_since > 10 and not bad_warned:
+                print("Still can't read a valid position. With this puzzle on screen, use the")
+                print("Tools tab > Debug view and send me the output and debug_board.png.")
+                bad_warned = True
             sleep_check(0.8)
             continue
+        bad_since, bad_warned = None, False
 
         if board.is_game_over():
             sleep_check(0.8)
@@ -693,7 +724,7 @@ def auto_puzzles():
                 warned = False
             elif time.time() - opp_since > 20 and not warned:
                 print("Nothing has happened for 20 seconds. If the puzzle looks solved, the Next")
-                print("button wasn't found: use menu option 10 (Next button check).")
+                print("button wasn't found: use the Tools tab > Next button check.")
                 warned = True
             sleep_check(0.4)
             continue
@@ -705,7 +736,7 @@ def auto_puzzles():
             tries += 1
             if tries > CFG["max_retries"] + 1:
                 print("The board stopped changing after my move, so I'm stopping.")
-                print("(Failed puzzle, or the game ignored the mouse. Try menu options 8 and 9.)")
+                print("(Failed puzzle, or the game ignored the mouse. Try the Cursor check tool.)")
                 return
             print(f"Move didn't register, retrying ({tries}/{CFG['max_retries'] + 1})...")
         else:

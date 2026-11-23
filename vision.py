@@ -22,8 +22,8 @@ HL = []
 TPL_DIR = ""
 BG_TOL = 22             # how close a pixel must be to the background to be erased
 WHITE_BRIGHTNESS = 170  # bright-pixel level above which a piece counts as white
-RED_MARGIN = 12         # red must beat green and blue by this much to count as check glow
-GLOW_MIN_PIXELS = 150   # this many red pixels in a square = king-in-check glow
+RED_MARGIN = 10         # red must beat green and blue by this much to count as check glow
+GLOW_MIN_PIXELS = 60    # this many red pixels in a square = king-in-check glow
 
 _printed_errors = set()
 
@@ -81,7 +81,8 @@ def find_board(img):
 
 def prepare(raw):
     """Returns (gray image with background erased, is_highlighted, label_ink, glow).
-    glow is None normally; for a king-in-check square it is 'w' or 'b' (piece color)."""
+    glow is None normally; for a king-in-check square it is 'w' or 'b' (piece color).
+    A glowing square is never counted as a last-move highlight."""
     sq = cv2.resize(raw, (96, 96))
     si = sq.astype(int)
     gray = cv2.cvtColor(sq, cv2.COLOR_BGR2GRAY).astype(np.float32)
@@ -118,6 +119,7 @@ def prepare(raw):
         near_bg = (np.abs(si - LIGHT).sum(axis=2) < 30) | (np.abs(si - DARK).sum(axis=2) < 30)
         bright = (gray > 215) & ((maxc - minc) <= 28) & ~near_bg & ~red_big
         glow = "w" if bright.sum() >= 120 else "b"
+        highlighted = False
 
     erase = (np.abs(si - bg).sum(axis=2) < BG_TOL) | red_big
     g = gray.copy()
@@ -215,12 +217,16 @@ def white_at_bottom_by_pieces(rows):
     bottom = sum(ch.isupper() for row in rows[4:] for ch in row)
     return bottom >= top
 
-def decide_orientation(rows, ink):
+def decide_orientation(rows, ink, corner_glow=False, check_white=None):
     """True if White is at the bottom of the screen."""
     if ORIENT == "white":
         return True, "forced by setting"
     if ORIENT == "black":
         return False, "forced by setting"
+    if corner_glow and check_white is not None:
+        # a check glow sits on a corner label square, so the label ink is unreliable;
+        # in puzzles the side to move (= the side in check) is at the bottom
+        return check_white, "from the side in check (corner label hidden by the glow)"
     t, b = ink[0][0], ink[7][0]
     big = max(t, b)
     if big > 0 and abs(t - b) / big > 0.15:
@@ -240,23 +246,30 @@ def rows_to_fen(rows):
         fen_rows.append(out + (str(empty) if empty else ""))
     return "/".join(fen_rows)
 
+def _check_info(glow):
+    colors = {glow[r][c] for r in range(8) for c in range(8) if glow[r][c]}
+    check_white = (next(iter(colors)) == "w") if len(colors) == 1 else None
+    return check_white, bool(glow[0][0] or glow[7][0])
+
 def _read_state(tpl):
     img = grab()
     x, y, side = find_board(img)
     sq, hl, ink, glow = split_board(img, x, y, side)
     rows, _, _ = read_screen_rows(sq, tpl, glow)
-    wab, _ = decide_orientation(rows, ink)
+    check_white, corner_glow = _check_info(glow)
+    wab, _ = decide_orientation(rows, ink, corner_glow, check_white)
 
-    mover_white = None
+    movers = set()
     for r in range(8):
         for c in range(8):
             if hl[r][c] and rows[r][c] != ".":
-                mover_white = rows[r][c].isupper()
+                movers.add(rows[r][c].isupper())
+    mover_white = next(iter(movers)) if len(movers) == 1 else None
 
     if not wab:
         rows = [row[::-1] for row in rows[::-1]]
-    return {"placement": rows_to_fen(rows), "wab": wab,
-            "mover_white": mover_white, "box": (x, y, side)}
+    return {"placement": rows_to_fen(rows), "wab": wab, "mover_white": mover_white,
+            "check_white": check_white, "box": (x, y, side)}
 
 def read_state(tpl=None):
     tpl = tpl or load_templates()
@@ -290,8 +303,10 @@ def debug():
     print(f"\nBrightness (white pieces should be above {WHITE_BRIGHTNESS}, black below):")
     for lrow in lights:
         print("  " + " ".join(f"{v:5.0f}" for v in lrow))
-    wab, why = decide_orientation(rows, ink)
+    check_white, corner_glow = _check_info(glow)
+    wab, why = decide_orientation(rows, ink, corner_glow, check_white)
     print("\nRank-number ink, left column top to bottom:", [ink[r][0] for r in range(8)])
+    print("King in check:", "none" if check_white is None else ("White" if check_white else "Black"))
     print("Decision:", "White at bottom" if wab else "Black at bottom (board flipped)", "-", why)
     out = os.path.join(BASE_DIR, "debug_board.png")
     cv2.imwrite(out, img[y:y+side, x:x+side])
@@ -303,6 +318,8 @@ def show():
     print("White at bottom" if st["wab"] else "Black at bottom (board flipped)")
     m = st["mover_white"]
     print("Last mover:", "none (fresh game)" if m is None else ("White" if m else "Black"))
+    c = st["check_white"]
+    print("King in check:", "none" if c is None else ("White" if c else "Black"))
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
